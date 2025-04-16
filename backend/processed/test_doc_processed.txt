@@ -1,2 +1,2 @@
-Patient [REDACTED], born [REDACTED], was diagnosed with hypertension.
-Contact him at [REDACTED] or [REDACTED]. [REDACTED]: [REDACTED].
+Patient [REDACTED], born [REDACTED], was diagnosed with hypertension. 
+Contact him at [REDACTED] or (555) [REDACTED]. [REDACTED]: [REDACTED].

@@ -6,8 +6,6 @@ import axios from 'axios';
 import mammoth from 'mammoth';
 import fileDownload from 'js-file-download';
 
-// We'll simplify to not use react-pdf for now
-
 function App() {
   const [file, setFile] = useState(null);
   const [fileContent, setFileContent] = useState('');
@@ -20,6 +18,10 @@ function App() {
   const [fileType, setFileType] = useState(null);
   const [processedFileType, setProcessedFileType] = useState(null);
   const [processedFileData, setProcessedFileData] = useState(null);
+
+  // Separate states for original and processed file URLs
+  const [originalObjectUrl, setOriginalObjectUrl] = useState(null);
+  const [processedObjectUrl, setProcessedObjectUrl] = useState(null);
 
   // Handle file drop
   const onDrop = async (acceptedFiles) => {
@@ -34,6 +36,12 @@ function App() {
       // Determine file type and set appropriate state
       const ext = file.name.split('.').pop().toLowerCase();
       setFileType(ext);
+
+      // If PDF, create object URL for browser viewing of the original file
+      if (ext === 'pdf') {
+        const url = URL.createObjectURL(file);
+        setOriginalObjectUrl(url);
+      }
 
       await handleFilePreview(file, ext);
     } catch (error) {
@@ -50,7 +58,30 @@ function App() {
     setDocText('');
     setProcessedFileData(null);
     setProcessedFileType(null);
+
+    // Revoke object URLs if they exist
+    if (originalObjectUrl) {
+      URL.revokeObjectURL(originalObjectUrl);
+      setOriginalObjectUrl(null);
+    }
+
+    if (processedObjectUrl) {
+      URL.revokeObjectURL(processedObjectUrl);
+      setProcessedObjectUrl(null);
+    }
   };
+
+  // Clean up object URLs when component unmounts
+  useEffect(() => {
+    return () => {
+      if (originalObjectUrl) {
+        URL.revokeObjectURL(originalObjectUrl);
+      }
+      if (processedObjectUrl) {
+        URL.revokeObjectURL(processedObjectUrl);
+      }
+    };
+  }, [originalObjectUrl, processedObjectUrl]);
 
   const handleFilePreview = async (file, ext) => {
     try {
@@ -65,7 +96,7 @@ function App() {
         reader.onload = () => setFileContent(reader.result);
         reader.readAsText(file);
       } else if (ext === 'pdf') {
-        // For PDFs, we'll just show a placeholder message
+        // For PDFs, we'll show it using the browser's PDF viewer
         setAlert({ type: 'info', message: 'PDF file uploaded. PDF content will be processed as text.' });
       } else if (['doc', 'docx'].includes(ext)) {
         if (ext === 'docx') {
@@ -143,6 +174,17 @@ function App() {
         const blob = new Blob([bytes], { type: contentType });
         setProcessedFileData(blob);
 
+        // For PDF files, create a new object URL for the processed PDF
+        // This is separate from the original file URL
+        if (fileType === 'pdf') {
+          // Revoke old processed URL if it exists
+          if (processedObjectUrl) {
+            URL.revokeObjectURL(processedObjectUrl);
+          }
+          const newObjectUrl = URL.createObjectURL(blob);
+          setProcessedObjectUrl(newObjectUrl);
+        }
+
         // For all file types, show as text
         const reader = new FileReader();
         reader.onload = () => setScanResults(reader.result);
@@ -181,6 +223,33 @@ function App() {
       'csv': 'text/csv'
     };
     return mimeTypes[ext] || 'text/plain';
+  };
+
+  // Browser PDF Viewer Component
+  const BrowserPDFViewer = ({ url, title }) => {
+    if (!url) return <div>No PDF to display</div>;
+
+    return (
+      <div className="pdf-viewer-container">
+        <h6 className="text-center mb-2">{title || "PDF Viewer"}</h6>
+        <object
+          data={url}
+          type="application/pdf"
+          width="100%"
+          height="600px"
+          className="pdf-object"
+        >
+          <div className="pdf-fallback">
+            <p>
+              Your browser doesn't support embedded PDFs.
+              <a href={url} target="_blank" rel="noopener noreferrer" className="pdf-download-link">
+                Download the PDF
+              </a> instead.
+            </p>
+          </div>
+        </object>
+      </div>
+    );
   };
 
   return (
@@ -293,9 +362,20 @@ function App() {
                       </div>
                     )}
 
-                    {['pdf', 'doc'].includes(fileType) && !docText && (
+                    {/* PDF Preview using Browser's PDF Viewer */}
+                    {fileType === 'pdf' && originalObjectUrl && (
+                      <BrowserPDFViewer url={originalObjectUrl} title="Original PDF" />
+                    )}
+
+                    {fileType === 'pdf' && !originalObjectUrl && (
                       <Alert variant="info">
-                        Preview not available for this file type, but the document can be processed for PHI detection.
+                        Error loading PDF preview, but the document can still be processed for PHI detection.
+                      </Alert>
+                    )}
+
+                    {fileType === 'doc' && !docText && (
+                      <Alert variant="info">
+                        Preview not available for DOC files, but the document can be processed for PHI detection.
                       </Alert>
                     )}
                   </Card.Body>
@@ -323,10 +403,18 @@ function App() {
                 <Card className="mt-4">
                   <Card.Header as="h5">Processed Document</Card.Header>
                   <Card.Body>
-                    <pre style={{ background: '#f1f1f1', padding: '1rem', borderRadius: '5px', maxHeight: '300px', overflowY: 'auto' }}>
-                      {scanResults.substring(0, 3000)}
-                      {scanResults.length > 3000 && "..."}
-                    </pre>
+                    {/* For processed PDFs, show PDF viewer */}
+                    {processedFileType === 'pdf' && processedObjectUrl && (
+                      <BrowserPDFViewer url={processedObjectUrl} title="Processed PDF" />
+                    )}
+
+                    {/* For text-based files, show content preview */}
+                    {(!processedFileType || processedFileType !== 'pdf' || !processedObjectUrl) && (
+                      <pre style={{ background: '#f1f1f1', padding: '1rem', borderRadius: '5px', maxHeight: '300px', overflowY: 'auto' }}>
+                        {scanResults.substring(0, 3000)}
+                        {scanResults.length > 3000 && "..."}
+                      </pre>
+                    )}
                   </Card.Body>
                   <Card.Footer>
                     <Button

@@ -10,6 +10,11 @@ import docx
 from werkzeug.utils import secure_filename
 from phi_scan import phi_scan  # Import the PHI scanning function
 import traceback
+import io
+from PyPDF2 import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.colors import red, black
+from reportlab.lib.pagesizes import letter
 
 app = Flask(__name__)
 CORS(app, resources={r"/upload": {"origins": "http://localhost:3000"}})
@@ -26,6 +31,7 @@ app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
 def generate_random_token(length=8):
     """
     Generate a random string of uppercase and lowercase letters and digits of the given length.
+    If a specific length is provided, the token will match that length exactly.
     """
     return "".join(random.choices(string.ascii_letters + string.digits, k=length))
 
@@ -49,26 +55,11 @@ def upload_file():
         print(f"File extension: {file_ext}")
         print(f"Handling method: {handling_method}")
 
-        # Process the file
+        # Process the file based on its type
         if file_ext == ".pdf":
             print("Starting PDF processing...")
-            # For PDFs, extract the text and save to a text file
-            text = extract_text_from_pdf(file_path)
-            print(f"PDF text extracted, length: {len(text)}")
-
-            # Scan text for PHI
-            phi_data = phi_scan_text(text)
-
-            # Process the text
-            processed_text = process_text(text, handling_method, phi_data)
-
-            # Save the processed text
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            processed_file_path = os.path.join(
-                app.config["PROCESSED_FOLDER"], f"{base_name}_processed.txt"
-            )
-            with open(processed_file_path, "w", encoding="utf-8") as f:
-                f.write(processed_text)
+            # Process PDF and keep it as PDF
+            processed_file_path = process_pdf(file_path, handling_method)
 
             # Read the processed file
             with open(processed_file_path, "rb") as f:
@@ -81,7 +72,7 @@ def upload_file():
                 {
                     "status": "success",
                     "file": encoded_file,
-                    "fileType": "txt",  # Always return as text for PDFs
+                    "fileType": "pdf",  # Return as PDF
                 }
             )
         else:
@@ -99,7 +90,9 @@ def upload_file():
                 {
                     "status": "success",
                     "file": encoded_file,
-                    "fileType": "txt",  # Always return as text for all file types
+                    "fileType": os.path.splitext(processed_file_path)[1][
+                        1:
+                    ],  # Return appropriate file type
                 }
             )
     except Exception as e:
@@ -113,85 +106,232 @@ def upload_file():
         )
 
 
+def process_pdf(file_path, handling_method):
+    """
+    Process a PDF file by extracting text, detecting PHI, and creating a new PDF with
+    PHI handled according to the specified method.
+    """
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    output_path = os.path.join(
+        app.config["PROCESSED_FOLDER"], f"{base_name}_processed.pdf"
+    )
+
+    try:
+        # 1. Extract text from the PDF
+        text_content = extract_text_from_pdf(file_path)
+
+        # 2. Scan for PHI in the extracted text
+        phi_data = phi_scan_text(text_content)
+
+        # 3. Process the PDF based on PHI data
+        if not phi_data:
+            # If no PHI found, just return the original PDF
+            with open(file_path, "rb") as f_in:
+                with open(output_path, "wb") as f_out:
+                    f_out.write(f_in.read())
+        else:
+            # If PHI found, create a new PDF with redacted/tokenized PHI
+            create_processed_pdf(file_path, output_path, phi_data, handling_method)
+
+        return output_path
+    except Exception as e:
+        print(f"Error processing PDF: {str(e)}")
+        traceback.print_exc()
+
+        # If PDF processing fails, create a text file with error message
+        error_path = os.path.join(
+            app.config["PROCESSED_FOLDER"], f"{base_name}_error.txt"
+        )
+        with open(error_path, "w") as f:
+            f.write(f"Error processing PDF: {str(e)}")
+        return error_path
+
+
+def create_processed_pdf(input_path, output_path, phi_data, handling_method):
+    """
+    Create a new PDF with PHI redacted/tokenized according to handling method.
+    Uses a text-based approach to identify and handle PHI in the PDF.
+    """
+    try:
+        # Extract full text from PDF for processing
+        with pdfplumber.open(input_path) as pdf:
+            # Create a list to store page text information
+            pages_text = []
+
+            # Extract text with position information from each page
+            for page_num, page in enumerate(pdf.pages):
+                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                words = page.extract_words(x_tolerance=3, y_tolerance=3)
+
+                # Store page information for processing
+                pages_text.append(
+                    {
+                        "page_num": page_num,
+                        "text": page_text,
+                        "words": words,
+                        "dimensions": (page.width, page.height),
+                    }
+                )
+
+        # Initialize the PDF reader/writer for generating new PDF
+        reader = PdfReader(input_path)
+        writer = PdfWriter()
+
+        # Track the number of redactions made
+        redaction_count = 0
+
+        # Process each page
+        for page_data in pages_text:
+            page_num = page_data["page_num"]
+            words = page_data["words"]
+            width, height = page_data["dimensions"]
+
+            # Get original page
+            page = reader.pages[page_num]
+
+            # Create a new PDF with overlay content for redactions
+            packet = io.BytesIO()
+            can = canvas.Canvas(packet, pagesize=(width, height))
+
+            # Process each PHI instance to find and redact in the current page
+            for phi_type, instances in phi_data.items():
+                for phi_instance in instances:
+                    # Skip empty or very short strings (less than 3 chars)
+                    if not phi_instance or len(phi_instance) < 3:
+                        continue
+
+                    # Find matching words on the page
+                    matched_words = []
+                    for word_data in words:
+                        word_text = word_data["text"]
+                        # Check for exact match or if the word contains the PHI
+                        if word_text == phi_instance or phi_instance in word_text:
+                            matched_words.append(word_data)
+
+                    # Process each matched word based on handling method
+                    for word_data in matched_words:
+                        x0, y0, x1, y1 = (
+                            word_data["x0"],
+                            word_data["top"],
+                            word_data["x1"],
+                            word_data["bottom"],
+                        )
+
+                        # Add some padding
+                        x0 = max(0, x0 - 2)
+                        y0 = max(0, y0 - 2)
+                        x1 = min(width, x1 + 2)
+                        y1 = min(height, y1 + 2)
+
+                        # Apply the appropriate handling method
+                        if handling_method == "redact":
+                            # Draw a black rectangle over the text
+                            can.setFillColorRGB(0, 0, 0)
+                            can.rect(x0, height - y1, x1 - x0, y1 - y0, fill=1)
+
+                            # Add [REDACTED] text
+                            can.setFillColorRGB(1, 1, 1)  # White text
+                            can.setFont("Helvetica", 8)
+                            can.drawString(
+                                x0 + 2, height - ((y0 + y1) / 2), "[REDACTED]"
+                            )
+
+                        elif handling_method == "tokenize":
+                            # Generate a random token
+                            token = generate_random_token(len(phi_instance))
+
+                            # Draw white rectangle to cover original text
+                            can.setFillColorRGB(1, 1, 1)
+                            can.rect(x0, height - y1, x1 - x0, y1 - y0, fill=1)
+
+                            # Draw tokenized text
+                            can.setFillColorRGB(0, 0, 1)  # Blue text
+                            can.setFont("Helvetica", 8)
+                            can.drawString(x0 + 2, height - ((y0 + y1) / 2), token)
+
+                        elif handling_method == "remove":
+                            # Draw white rectangle to "erase" the text
+                            can.setFillColorRGB(1, 1, 1)
+                            can.rect(x0, height - y1, x1 - x0, y1 - y0, fill=1)
+
+                        redaction_count += 1
+
+            # Add a watermark indicating the document has been processed
+            can.setFont("Helvetica", 8)
+            can.setFillColorRGB(0.7, 0, 0)  # Dark red
+            can.drawString(
+                50,
+                20,
+                f"PHI {handling_method.upper()}ED - {redaction_count} instances processed",
+            )
+
+            # Close the overlay
+            can.save()
+
+            # Move to the beginning of the BytesIO buffer
+            packet.seek(0)
+            overlay = PdfReader(packet)
+
+            # Merge the overlay with the original page
+            page.merge_page(overlay.pages[0])
+
+            # Add the processed page to the output PDF
+            writer.add_page(page)
+
+        # Save the output PDF
+        with open(output_path, "wb") as output_file:
+            writer.write(output_file)
+
+        return output_path
+    except Exception as e:
+        print(f"Error creating processed PDF: {str(e)}")
+        traceback.print_exc()
+        raise
+
+
 def process_file(file_path, handling_method, file_ext):
     """
-    Process the file based on its type, preserving the original format when possible.
+    Process non-PDF files based on their type
     """
     base_name = os.path.splitext(os.path.basename(file_path))[0]
 
-    # For PDFs, we'll keep the original format
-    if file_ext == ".pdf":
-        try:
-            # Extract text from PDF
-            text = extract_text_from_pdf(file_path)
+    try:
+        # Extract text based on file type
+        if file_ext in [".doc", ".docx"]:
+            text = extract_text_from_doc(file_path, file_ext)
+        else:
+            # For text-based files, read directly
+            try:
+                with open(file_path, "r", encoding="utf-8") as file:
+                    text = file.read()
+            except UnicodeDecodeError:
+                # Handle encoding issues
+                with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+                    text = file.read()
 
-            # Scan for PHI
-            phi_data = phi_scan_text(text)
+        # Scan for PHI
+        phi_data = phi_scan_text(text)
 
-            # Create a text version with PHI handling applied
-            processed_text = process_text(text, handling_method, phi_data)
+        # Process the text
+        processed_text = process_text(text, handling_method, phi_data)
 
-            # Save the processed text
-            text_file_path = os.path.join(
-                app.config["PROCESSED_FOLDER"], f"{base_name}_processed.txt"
-            )
-            with open(text_file_path, "w", encoding="utf-8") as f:
-                f.write(processed_text)
+        # Save processed text
+        processed_file_path = os.path.join(
+            app.config["PROCESSED_FOLDER"], f"{base_name}_processed.txt"
+        )
+        with open(processed_file_path, "w", encoding="utf-8") as f:
+            f.write(processed_text)
 
-            # For PDFs, return the text file but maintain the original file extension in the response
-            return text_file_path, ".pdf"
+        return processed_file_path
 
-        except Exception as e:
-            print(f"Error processing PDF: {str(e)}")
-            # Create an error text file
-            error_file_path = os.path.join(
-                app.config["PROCESSED_FOLDER"], f"{base_name}_error.txt"
-            )
-            with open(error_file_path, "w", encoding="utf-8") as f:
-                f.write(f"Error processing PDF: {str(e)}")
-            return error_file_path, ".txt"
-
-    # For all other file types, process as text
-    else:
-        try:
-            # Extract text based on file type
-            if file_ext in [".doc", ".docx"]:
-                text = extract_text_from_doc(file_path, file_ext)
-            else:
-                # For text-based files, read directly
-                try:
-                    with open(file_path, "r", encoding="utf-8") as file:
-                        text = file.read()
-                except UnicodeDecodeError:
-                    # Handle encoding issues
-                    with open(
-                        file_path, "r", encoding="utf-8", errors="replace"
-                    ) as file:
-                        text = file.read()
-
-            # Scan for PHI
-            phi_data = phi_scan_text(text)
-
-            # Process the text
-            processed_text = process_text(text, handling_method, phi_data)
-
-            # Save processed text
-            processed_file_path = os.path.join(
-                app.config["PROCESSED_FOLDER"], f"{base_name}_processed.txt"
-            )
-            with open(processed_file_path, "w", encoding="utf-8") as f:
-                f.write(processed_text)
-
-            return processed_file_path, ".txt"
-
-        except Exception as e:
-            print(f"Error processing file: {str(e)}")
-            error_file_path = os.path.join(
-                app.config["PROCESSED_FOLDER"], f"{base_name}_error.txt"
-            )
-            with open(error_file_path, "w", encoding="utf-8") as f:
-                f.write(f"Error processing file: {str(e)}")
-            return error_file_path, ".txt"
+    except Exception as e:
+        print(f"Error processing file: {str(e)}")
+        error_file_path = os.path.join(
+            app.config["PROCESSED_FOLDER"], f"{base_name}_error.txt"
+        )
+        with open(error_file_path, "w", encoding="utf-8") as f:
+            f.write(f"Error processing file: {str(e)}")
+        return error_file_path
 
 
 def extract_text_from_pdf(file_path):
@@ -304,7 +444,9 @@ def tokenize_text(text, phi_data):
     """
     for phi_type, substrings in phi_data.items():
         for substring in substrings:
-            random_token = generate_random_token()  # Generate a random token
+            random_token = generate_random_token(
+                len(substring)
+            )  # Generate a random token of same length
             text = text.replace(substring, random_token)
     return text
 
