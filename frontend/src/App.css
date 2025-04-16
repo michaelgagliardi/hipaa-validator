@@ -1,0 +1,26 @@
+/* App.css */
+body {
+  font-family: 'Arial', sans-serif;
+}
+
+.card {
+  background-color: #f8f9fa;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.card-header {
+  background-color: #007bff;
+  color: white;
+}
+
+.table {
+  background-color: #ffffff;
+}
+
+button {
+  font-size: 16px;
+}
+
+button:focus {
+  outline: none;
+}

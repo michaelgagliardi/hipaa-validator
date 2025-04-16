@@ -1,0 +1,2 @@
+Patient         , born           , was diagnosed with hypertension. 
+Contact him at                      or               .    :            .

@@ -1,0 +1,2 @@
+Patient John Doe, born 06/25/1988, was diagnosed with hypertension. 
+Contact him at john.doe@example.com or (555) 123-4567. SSN: 123-45-6789.
