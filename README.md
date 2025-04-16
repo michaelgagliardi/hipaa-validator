@@ -1,10 +1,26 @@
-# Getting Started with Create React App
+# HIPAA Validator -- Scan documents for potential HIPAA Violations
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
 
-## Available Scripts
+This project allows users to upload documents to a web application, scanning them for HIPAA violations.\
+This will also produce a modified version of the document, addressing any potential PHI (Protected Health Information) in a format the user chooses.
+Your document is not stored anywhere, and replaced with the modified version in the local directory.
 
-In the project directory, you can run:
+## Setup
+
+Make sure you have npm installed, I use PyEnv for my environment for this project, a list of packages can be found in the requirements.txt file in the backend directory.
+
+## Backend
+
+In the /backend directory, run:
+
+### `python main.py`
+
+Make sure this is running at [http://127.0.0.1:5000] (or will require updates to frontend)
+
+## Frontend
+
+In the /frontend directory, you can run:
 
 ### `npm start`
 
