@@ -9,14 +9,18 @@ import pdfplumber
 import docx
 from werkzeug.utils import secure_filename
 from phi_scan import phi_scan  # Import the PHI scanning function
+import traceback
 
 app = Flask(__name__)
 CORS(app, resources={r"/upload": {"origins": "http://localhost:3000"}})
 
-# Ensure uploads directory exists
+# Ensure directories exist
 UPLOAD_FOLDER = "./uploads"
+PROCESSED_FOLDER = "./processed"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
 
 
 def generate_random_token(length=8):
@@ -31,101 +35,243 @@ def upload_file():
     try:
         # Get file from the request
         file = request.files["file"]
-        handling_method = request.form[
-            "handlingMethod"
-        ]  # Get handling method from form data
+        handling_method = request.form["handlingMethod"]
 
-        # Save the file to the uploads folder for further processing
-        file_path = os.path.join(app.config["UPLOAD_FOLDER"], file.filename)
+        # Secure the filename
+        filename = secure_filename(file.filename)
+        file_ext = os.path.splitext(filename)[1].lower()
+
+        # Save the file
+        file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
         file.save(file_path)
 
-        # Process the file based on the handling method
-        processed_file_path = process_file(file_path, handling_method)
+        print(f"File saved to {file_path}")
+        print(f"File extension: {file_ext}")
+        print(f"Handling method: {handling_method}")
 
-        # Read the processed file
-        with open(processed_file_path, "rb") as f:
-            processed_file = f.read()
+        # Process the file
+        if file_ext == ".pdf":
+            print("Starting PDF processing...")
+            # For PDFs, extract the text and save to a text file
+            text = extract_text_from_pdf(file_path)
+            print(f"PDF text extracted, length: {len(text)}")
 
-        # Encode the processed file to base64
-        encoded_file = base64.b64encode(processed_file).decode("utf-8")
+            # Scan text for PHI
+            phi_data = phi_scan_text(text)
 
-        return jsonify(
-            {"status": "success", "file": encoded_file}
-        )  # Send back the base64 encoded file
+            # Process the text
+            processed_text = process_text(text, handling_method, phi_data)
+
+            # Save the processed text
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            processed_file_path = os.path.join(
+                app.config["PROCESSED_FOLDER"], f"{base_name}_processed.txt"
+            )
+            with open(processed_file_path, "w", encoding="utf-8") as f:
+                f.write(processed_text)
+
+            # Read the processed file
+            with open(processed_file_path, "rb") as f:
+                processed_file = f.read()
+
+            # Encode the processed file to base64
+            encoded_file = base64.b64encode(processed_file).decode("utf-8")
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "file": encoded_file,
+                    "fileType": "txt",  # Always return as text for PDFs
+                }
+            )
+        else:
+            # For other file types, process normally
+            processed_file_path = process_file(file_path, handling_method, file_ext)
+
+            # Read the processed file
+            with open(processed_file_path, "rb") as f:
+                processed_file = f.read()
+
+            # Encode the processed file to base64
+            encoded_file = base64.b64encode(processed_file).decode("utf-8")
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "file": encoded_file,
+                    "fileType": "txt",  # Always return as text for all file types
+                }
+            )
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return jsonify({"status": "error", "message": "Error processing the file"}), 500
+        print(f"Error processing file: {str(e)}")
+        traceback.print_exc()
+        return (
+            jsonify(
+                {"status": "error", "message": f"Error processing the file: {str(e)}"}
+            ),
+            500,
+        )
 
 
-def process_file(file_path, handling_method):
+def process_file(file_path, handling_method, file_ext):
     """
-    Process the file based on the handling method.
-    Modify the file content and return the path to the processed file.
+    Process the file based on its type, preserving the original format when possible.
     """
-    # First, scan the file for potential PHI
-    phi_data = phi_scan(file_path)
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
 
-    # Check file extension and handle accordingly
-    file_extension = os.path.splitext(file_path)[1].lower()
+    # For PDFs, we'll keep the original format
+    if file_ext == ".pdf":
+        try:
+            # Extract text from PDF
+            text = extract_text_from_pdf(file_path)
 
-    if file_extension == ".pdf":
-        text = extract_text_from_pdf(file_path)
-    elif file_extension in [".doc", ".docx"]:
-        text = extract_text_from_doc(file_path)
+            # Scan for PHI
+            phi_data = phi_scan_text(text)
+
+            # Create a text version with PHI handling applied
+            processed_text = process_text(text, handling_method, phi_data)
+
+            # Save the processed text
+            text_file_path = os.path.join(
+                app.config["PROCESSED_FOLDER"], f"{base_name}_processed.txt"
+            )
+            with open(text_file_path, "w", encoding="utf-8") as f:
+                f.write(processed_text)
+
+            # For PDFs, return the text file but maintain the original file extension in the response
+            return text_file_path, ".pdf"
+
+        except Exception as e:
+            print(f"Error processing PDF: {str(e)}")
+            # Create an error text file
+            error_file_path = os.path.join(
+                app.config["PROCESSED_FOLDER"], f"{base_name}_error.txt"
+            )
+            with open(error_file_path, "w", encoding="utf-8") as f:
+                f.write(f"Error processing PDF: {str(e)}")
+            return error_file_path, ".txt"
+
+    # For all other file types, process as text
     else:
-        # If the file is not recognized, handle it as plain text
-        with open(file_path, "r") as file:
-            text = file.read()
+        try:
+            # Extract text based on file type
+            if file_ext in [".doc", ".docx"]:
+                text = extract_text_from_doc(file_path, file_ext)
+            else:
+                # For text-based files, read directly
+                try:
+                    with open(file_path, "r", encoding="utf-8") as file:
+                        text = file.read()
+                except UnicodeDecodeError:
+                    # Handle encoding issues
+                    with open(
+                        file_path, "r", encoding="utf-8", errors="replace"
+                    ) as file:
+                        text = file.read()
 
-    # Process the text using the selected handling method
-    processed_text = process_text(text, handling_method, phi_data)
+            # Scan for PHI
+            phi_data = phi_scan_text(text)
 
-    # Save the processed text back to the file
-    processed_file_path = file_path.replace(
-        os.path.splitext(file_path)[1], "_processed.txt"
-    )
-    with open(processed_file_path, "w") as file:
-        file.write(processed_text)
+            # Process the text
+            processed_text = process_text(text, handling_method, phi_data)
 
-    return processed_file_path
+            # Save processed text
+            processed_file_path = os.path.join(
+                app.config["PROCESSED_FOLDER"], f"{base_name}_processed.txt"
+            )
+            with open(processed_file_path, "w", encoding="utf-8") as f:
+                f.write(processed_text)
+
+            return processed_file_path, ".txt"
+
+        except Exception as e:
+            print(f"Error processing file: {str(e)}")
+            error_file_path = os.path.join(
+                app.config["PROCESSED_FOLDER"], f"{base_name}_error.txt"
+            )
+            with open(error_file_path, "w", encoding="utf-8") as f:
+                f.write(f"Error processing file: {str(e)}")
+            return error_file_path, ".txt"
 
 
 def extract_text_from_pdf(file_path):
     """
-    Extract text from a PDF file using pdfplumber.
+    Extract text from a PDF file using pdfplumber with better error handling.
     """
     text = ""
-    with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text() + "\n"
-    return text
+    try:
+        print(f"Opening PDF file: {file_path}")
+        with pdfplumber.open(file_path) as pdf:
+            page_count = len(pdf.pages)
+            print(f"PDF has {page_count} pages")
+
+            for i, page in enumerate(pdf.pages):
+                try:
+                    print(f"Processing page {i+1}/{page_count}")
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+                    else:
+                        print(f"No text extracted from page {i+1}")
+                except Exception as e:
+                    print(f"Error extracting text from page {i+1}: {str(e)}")
+                    traceback.print_exc()
+                    text += f"[Error extracting page {i+1}: {str(e)}]\n"
+
+        if not text.strip():
+            print("No text was extracted from any page of the PDF")
+            text = "[No readable text found in the PDF. The file may be scanned or contain only images]"
+
+        return text
+    except Exception as e:
+        print(f"Error opening or processing PDF: {str(e)}")
+        traceback.print_exc()
+        return f"[Error processing PDF: {str(e)}]"
 
 
-def extract_text_from_doc(file_path):
+def extract_text_from_doc(file_path, file_ext):
     """
-    Extract text from a Word document (both .docx and .doc files).
+    Extract text from Word documents (.docx).
+    For .doc files, just return a message (not supported on non-Windows).
     """
-    file_extension = os.path.splitext(file_path)[1].lower()
-
-    if file_extension == ".docx":
-        return extract_text_from_docx(file_path)
-    elif file_extension == ".doc":
-        # For .doc files, we can use pythoncom or a different approach if needed.
-        # For now, we just return a placeholder.
-        return "This is a .doc file. PDF or DOCX files are preferred."
-    else:
+    try:
+        if file_ext == ".docx":
+            doc = docx.Document(file_path)
+            text = "\n".join([para.text for para in doc.paragraphs])
+            return text
+        elif file_ext == ".doc":
+            return "DOC file processing requires Windows. Please convert to DOCX format for cross-platform compatibility."
+    except Exception as e:
+        print(f"Error extracting text from Word document: {str(e)}")
         return ""
 
 
-def extract_text_from_docx(file_path):
+def phi_scan_text(text):
     """
-    Extract text from a .docx file using the python-docx library.
+    Scan text directly for PHI.
+    Creates a temporary file for the PHI scanning function to process.
     """
-    doc = docx.Document(file_path)
-    text = ""
-    for para in doc.paragraphs:
-        text += para.text + "\n"
-    return text
+    import tempfile
+
+    # Write text to a temporary file for PHI scanning
+    temp_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False, mode="w", encoding="utf-8"
+        ) as temp_file:
+            temp_file_path = temp_file.name
+            temp_file.write(text)
+
+        # Scan the text file for PHI
+        phi_data = phi_scan(temp_file_path)
+        return phi_data
+    except Exception as e:
+        print(f"Error scanning for PHI: {str(e)}")
+        return {}
+    finally:
+        # Clean up the temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
 
 
 def process_text(text, handling_method, phi_data):
